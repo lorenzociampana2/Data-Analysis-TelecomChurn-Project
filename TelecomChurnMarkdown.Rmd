@@ -1,0 +1,842 @@
+---
+title: "Telecom Churn"
+author: "Matteo Carucci, Alessandro Natoli, Tommaso Agudio, Lorenzo Ciampana"
+output: 
+  pdf_document: 
+    number_sections: true
+  html_document:
+    number_sections: true
+  word_document: default
+date: "2023-05-07"
+editor_options:
+  markdown:
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+```
+
+# Final Project: Identifying Telecom Churn Clients
+
+*Matteo Carucci, Alessandro Natoli, Tommaso Agudio and Lorenzo Ciampana.*
+
+***Important Disclaimer: We understand the importance of providing clear and smart code,
+however we prioritized the importance of our findings. To check all our elaborations and
+techniques tried, please refer to the complete Rscript code - Some important chunks have been
+omitted from this report due to their size**
+
+## 
+
+Importing all the necessary libraries for the data analysis and model creation
+
+```{r, echo = FALSE}
+# Load necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(GGally)
+library(corrplot)
+library(forcats)
+library(gridExtra)
+library(caret)
+library(pROC)
+library(randomForest)
+library(e1071)
+library(glmnet)
+library(fpc)
+library(cluster)
+library(purrr)
+library(cowplot)
+library(tidyverse)
+library(gridExtra)
+library(tidyverse)
+library(gridExtra)
+library(factoextra)
+library(tidyverse)
+library(gridExtra)
+library(dplyr)
+
+```
+
+First we will load the dataset, rename to columns and convert all the categorical features into factors
+
+```{r, echo=FALSE}
+# Load data
+data <- read.csv("C:/TelecomChurn.csv")
+
+# Rename columns
+colnames(data) <- c("State", "Account.Length", "Area.Code", "International.Plan", "Voice.Mail.Plan", "Number.Vmail.Messages", "Total.Day.Minutes", "Total.Day.Calls", "Total.Day.Charge", "Total.Eve.Minutes", "Total.Eve.Calls", "Total.Eve.Charge", "Total.Night.Minutes", "Total.Night.Calls", "Total.Night.Charge", "Total.Intl.Minutes", "Total.Intl.Calls", "Total.Intl.Charge", "Number.Customer.Service.Calls", "Churn")
+
+# Convert the categorical variables to factors
+data$State <- as.factor(data$State)
+data$International.Plan <- as.factor(data$International.Plan)
+data$Voice.Mail.Plan <- as.factor(data$Voice.Mail.Plan)
+data$Churn <- as.factor(data$Churn)
+
+```
+
+# Exploratory Data Analysis
+
+We perform some EDA, in order to better understand the dataset we are dealing with and eventually some of the behaviors of the customers.
+\tiny
+```{r, echo=FALSE ,fig.width = 7, fig.height = 3.5, fig.align = 'center'}
+
+## Summary of the data
+#summary(data)
+
+## Plotting the distribution of numeric variables
+data %>%
+  select_if(is.numeric) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ variable, scales = "free") +
+  theme_minimal()
+
+## Plotting categorical variables
+data %>%
+  select_if(is.factor) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(value, fill = value)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free") +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# Calculate correlation matrix
+cor_matrix <- cor(data[, c("Account.Length", "Number.Vmail.Messages", "Total.Day.Minutes", "Total.Day.Calls", "Total.Day.Charge", "Total.Eve.Minutes", "Total.Eve.Calls", "Total.Eve.Charge", "Total.Night.Minutes", "Total.Night.Calls", "Total.Night.Charge", "Total.Intl.Minutes", "Total.Intl.Calls", "Total.Intl.Charge", "Number.Customer.Service.Calls")])
+
+# Convert correlation matrix to data frame
+cor_data <- as.data.frame(as.table(cor_matrix))
+colnames(cor_data) <- c("Variable1", "Variable2", "Correlation")
+
+# Create correlation plot with rotated x-axis labels
+ggplot(cor_data, aes(x = Variable1, y = Variable2, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, limits = c(-1, 1)) +
+  theme_minimal() +
+  labs(title = "Correlation Plot") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+## Pairwise scatter plots with GGally
+#ggpairs(data[, c("Total.Day.Minutes", "Total.Day.Calls", "Total.Day.Charge", "Total.Eve.Minutes", "Total.Eve.Calls", "Total.Eve.Charge", "Total.Night.Minutes", "Total.Night.Calls", "Total.Night.Charge", "Total.Intl.Minutes", "Total.Intl.Calls", "Total.Intl.Charge", "Churn")], aes(color = Churn))
+
+
+```
+\normalsize
+**1.** For the first graph we see a summary of the whole dataset, and we noticed that most of the people do not have a Voice mail plan and don't have an International plan.
+The churn rate is around 16%.
+The interquantile ranges seem rather normal and there is nothing that might be unsettling apart from the 3rd quantile for Total.Int.Calls and the Max.
+
+**2.** In the second graph, we plotted various distributions of the numerical variables and we can see that most of the variables have a normal distribution, while on the other hand we can clearly see that "Total international calls" and "Number of customer service calls" are right skewed.
+We can also say that "Area Code" and "Number Vmail Messages" have a strange distribution (we will later see if they influence or not).
+
+**3.** In the third graph we plotted the categorical variables and we can confirm what we said about the categorical variables before, while we have a better view of the states and how many customers belong to each state.
+We cannot state anything significant except for a state that has a slight higher number of customers (only 20 more than the second biggest).
+
+**4.** In the fourth graph we plotted the correlations of the variables and we can say that all of them are almost not correlated at all (there are slight colors but the intensity is not significant).
+The only variables that are correlated are "Total Day Minutes"-"Total Day Charge", "Total Eve Minutes"-"Total Eve Charge", "Total night charge"-"Total night minutes" and "Total international minutes"-"Total international Charge".
+They are correlated for the fact that the more you call the more you spend.
+
+```{r, echo=FALSE,fig.width = 7, fig.height = 3.5, fig.align = 'center'}
+library(gridExtra)
+
+## Churn by state
+plot1 <- data %>%
+  ggplot(aes(State, fill = Churn)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+## Top 5 States with Highest Churn Rate
+top_churn_states <- data %>%
+  group_by(State) %>%
+  summarise(Churned = sum(Churn == "True"), Total = n()) %>%
+  mutate(ChurnRate = Churned / Total) %>%
+  arrange(desc(ChurnRate)) %>%
+  slice_head(n = 5) %>%
+  mutate(State = factor(State, levels = rev(State)))  # Reorder states for correct sorting
+
+plot2 <- ggplot(top_churn_states, aes(x = State, fill = ChurnRate)) +
+  geom_bar() +
+  scale_fill_gradient(low = "blue", high = "red") +  # Change colors here
+  theme_minimal() +
+  labs(title = "Top 5 States with Highest Churn Rate", x = "State", y = "Churn Rate") +
+  coord_flip()  # Flip the coordinates to display bars horizontally
+
+## Churn by international plan and voicemail plan
+plot3 <- data %>%
+  ggplot(aes(interaction(International.Plan, Voice.Mail.Plan), fill = Churn)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  labs(x = "International.Plan:Voice.Mail.Plan")
+
+## Number of customer service calls by churn
+plot4 <- data %>%
+  ggplot(aes(Number.Customer.Service.Calls, fill = Churn)) +
+  geom_bar(position = "fill") +
+  theme_minimal()
+
+## Churn rate by area code
+plot5 <- data %>%
+  ggplot(aes(as.factor(Area.Code), fill = Churn)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  labs(x = "Area Code")
+
+## Churn rate by the number of international calls
+plot6 <- data %>%
+  ggplot(aes(Total.Intl.Calls, fill = Churn)) +
+  geom_bar(position = "fill") +
+  theme_minimal()
+
+## Churn rate by account length
+plot7 <- data %>%
+  ggplot(aes(Account.Length, fill = Churn)) +
+  geom_histogram(bins = 30, position = "fill") +
+  theme_minimal()
+
+## Arrange the plots in a grid
+grid.arrange(plot1, plot2, plot3, ncol = 2)
+grid.arrange( plot4, plot5, plot6, plot7, ncol=2)
+
+
+```
+
+**1.** In the first graph and the second we plotted the churn rate based on the states.
+We can see that the maximum churn rate is 26% for California.
+The lowest one has around 5% of churn rate.
+In general the churn rate is not that significant due to the fact that we have states that have large population which will clearly have a larger churn rate compared to states with a smaller population (ie California 32.6 million and Iowa 3.1 million).
+
+**2.** In the third graph we see a combination of 'International Plan' with The 'voice Mail Plan'.
+We can clearly see that the combination yes:no and yes:yes have a churn rate that is slightly less than 50% which is rather significant, implying that potential additional costs for international plans or the voice mail plan do not satisfy the customers needs.
+
+**3.** In the fourth graph we can see that the more a customer calls the customer service the more likely he will churn.
+For instance after 8 calls the customer will almost certainly churn.
+
+**4.** In the sixth graph we can say that area code doesn't influence the churn rate.
+
+**5.** In the seventh graph we noticed something interesting, between 0 and 14 calls the churn rate is rather low, while for 15 calls we have a spike increase of the churn rate of around 45%, between 16 and 19 we have no churn rate (maybe due to the small amount of observations) and at 20 calls we have a churn rate of 100%, but if we look at the dataset in depth we can see that from 16 to 20 calls there are only 7 observation, therefore this range shouldn't be considered significant.
+
+**6.** In the last graph we can state that the account length doesn't influence that much the churn rate.
+But in the range 225-250 there are only 3 observations, meaning that the range cannot be taken into consideration.
+
+# Data Cleaning
+
+Now we want to see if the dataset is clean and if there is a significant amount of outliers.
+
+```{r, echo=FALSE,fig.width = 6, fig.height = 3, fig.align = 'center'}
+# Check for duplicates
+if (any(duplicated(data))) {
+  print("Duplicates found.")
+} else {
+  print("No duplicates found.")
+}
+
+# Check for NaN columns
+nan_columns <- colnames(data)[colSums(is.na(data)) > 0]
+if (length(nan_columns) > 0) {
+  print("NaN values found in the following columns:")
+  print(nan_columns)
+} else {
+  print("No NaN values found in any column.")
+}
+
+#checking for outliers
+numeric_columns <- colnames(data)[sapply(data, is.numeric)]
+
+for (col in numeric_columns) {
+  Q1 <- quantile(data[[col]], 0.25)
+  Q3 <- quantile(data[[col]], 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  outliers <- data[[col]] < lower_bound | data[[col]] > upper_bound
+  #cat(col, ":", sum(outliers), "\n")
+}
+
+#plotting to see outliers
+numeric_data <- data %>%
+  select_if(is.numeric) %>%
+  select(-c("Area.Code")) %>%
+  gather(key = "variable", value = "value")
+
+ggplot(numeric_data, aes(x = variable, y = value)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Boxplots of Numeric Variables")
+
+```
+
+The dataset doesn't have null values nor duplicate values, so it doesn't need any sort of cleaning.
+For what concerns the outliers it seems reasonable to eliminate only "Total International Calls" based on its distribution.
+We've seen also that "Number of customer service calls" is right skewed, but we will keep it has it is because it is most likely that a person that calls a lot the customer service will churn, since he might be facing problems with the service.
+
+```{r, echo=FALSE,fig.width = 6, fig.height = 3, fig.align = 'center'}
+# Cleaning outliers for Total.Intl.Calls only
+Q1 <- quantile(data$Total.Intl.Calls, 0.25)
+Q3 <- quantile(data$Total.Intl.Calls, 0.75)
+IQR <- Q3 - Q1
+lower_bound <- Q1 - 1.5 * IQR
+upper_bound <- Q3 + 1.5 * IQR
+data$Total.Intl.Calls <- ifelse(data$Total.Intl.Calls < lower_bound, lower_bound, data$Total.Intl.Calls)
+data$Total.Intl.Calls <- ifelse(data$Total.Intl.Calls > upper_bound, upper_bound, data$Total.Intl.Calls)
+
+# Gathering and plotting cleaned numeric variables
+cleaned_numeric_data <- data %>%
+  select(one_of(numeric_columns)) %>%
+  gather(key = "variable", value = "value")
+
+#ggplot(cleaned_numeric_data, aes(x = variable, y = value)) +
+#  geom_boxplot() +
+#  theme_minimal() +
+#  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+# labs(title = "Boxplots of Cleaned Numeric Variables")
+```
+# Model Implementation
+
+Now we will create, fit and test the accuracy of a lasso logistic regression model.
+The goal of the model is to predict whether a customer will churn or not. The primary objective is to identify if a customer will churn or not, we can probably guess that there is an intrinsic relationship between churning and the number of customer service calls.
+Our objective is to notice if other features could influence the churn rate, for example the international plan and the voice mail plan, and maybe see if it is related to the price charged of the customer.
+
+```{r, echo= FALSE, fig.width = 6, fig.height = 3, fig.align = 'center'}
+
+# Split the data into training and testing sets
+set.seed(3456)
+index <- createDataPartition(data$Churn, p = 0.8, list = FALSE)
+train_set <- data[index, ]
+test_set <- data[-index, ]
+# Create model matrix
+x_train <- model.matrix(Churn ~ . - 1, data = train_set)
+y_train <- train_set$Churn
+
+x_test <- model.matrix(Churn ~ . - 1, data = test_set)
+y_test <- test_set$Churn
+# Set seed for reproducibility
+set.seed(123)
+
+# Fit the Lasso regression model
+cv.lasso <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 1, nfolds = 10)
+
+# Use BIC to choose lambda
+lambda.bic <- cv.lasso$lambda.1se
+# Predict on the test set
+predictions <- predict(cv.lasso, newx = x_test, type = "response", s = lambda.bic)
+# Convert probabilities to class labels
+predicted_labels <- ifelse(predictions > 0.5, "1", "0")
+
+# Convert to factors
+predicted_labels <- as.factor(predicted_labels)
+y_test <- as.factor(y_test)
+
+# Ensure they have the same levels
+levels(predicted_labels) <- levels(y_test)
+
+# Compute confusion matrix and accuracy
+#confusionMatrix(predicted_labels, y_test)
+# Compute AUC-ROC
+roc_obj <- roc(y_test, as.numeric(predictions))
+#auc(roc_obj)
+# Accuracy
+accuracy <- sum(predicted_labels == y_test) / nrow(test_set)
+
+
+# Precision, Recall, and F1 Score
+conf_mat <- confusionMatrix(predicted_labels, y_test)$table
+precision <- conf_mat[2,2] / sum(conf_mat[2,])
+recall <- conf_mat[2,2] / sum(conf_mat[,2])
+f1_score <- 2 * ((precision*recall) / (precision + recall))
+
+
+
+```
+
+Now, let us see if by excluding the Number Customer Service Calls, which is clearly a key feature when considering churning rate, will give us a worse model for the classification predictions.
+
+```{r, echo = FALSE, fig.width = 6, fig.height = 3, fig.align = 'center'}
+# Split the data into training and testing sets
+set.seed(3456)
+# Create model matrix excluding "Number.Customer.Service.Calls"
+x_train2 <- model.matrix(Churn ~ . - 1 - Number.Customer.Service.Calls, data = train_set)
+y_train2 <- train_set$Churn
+
+x_test2 <- model.matrix(Churn ~ . - 1 - Number.Customer.Service.Calls, data = test_set)
+y_test2 <- test_set$Churn
+# Set seed for reproducibility
+set.seed(123)
+
+# Fit the Lasso regression model
+cv.lasso <- cv.glmnet(x_train2, y_train2, family = "binomial", alpha = 1, nfolds = 10)
+
+# Use BIC to choose lambda
+lambda.bic <- cv.lasso$lambda.1se
+# Predict on the test set
+predictions2 <- predict(cv.lasso, newx = x_test2, type = "response", s = lambda.bic)
+# Convert probabilities to class labels
+predicted_labels2 <- ifelse(predictions2 > 0.5, "1", "0")
+
+# Convert to factors
+predicted_labels2 <- as.factor(predicted_labels2)
+y_test2 <- as.factor(y_test2)
+
+# Ensure they have the same levels
+levels(predicted_labels2) <- levels(y_test2)
+
+# Compute confusion matrix and accuracy
+#confusionMatrix(predicted_labels2, y_test2)
+# Compute AUC-ROC
+roc_obj2 <- roc(y_test2, as.numeric(predictions2))
+#auc(roc_obj2)
+# Accuracy
+accuracy2 <- sum(predicted_labels2 == y_test2) / nrow(test_set)
+
+
+# Precision, Recall, and F1 Score
+conf_mat2 <- confusionMatrix(predicted_labels2, y_test2)$table
+precision2 <- conf_mat2[2,2] / sum(conf_mat2[2,])
+recall2 <- conf_mat2[2,2] / sum(conf_mat2[,2])
+f1_score2 <- 2 * ((precision2*recall2) / (precision2 + recall2))
+
+
+
+#df to store the model performance indicators
+performance_df <- data.frame(Model = character(), RMSE = numeric(), R2 = numeric(), stringsAsFactors = FALSE)
+performance_df <- rbind(performance_df, c("LLR without Customer Service Calls", precision2,auc(roc_obj2),f1_score2, recall2, accuracy2))
+performance_df <- rbind(performance_df, c("LLR with Cutomer Service Calls", precision,auc(roc_obj),f1_score, recall, accuracy))
+colnames(performance_df) <- c("Model", "Precision", "AUC","F1","Recall","Accuracy")
+performance_df
+
+
+
+```
+
+From the provided table, we can see the following insights:
+
+1\.
+**Precision**: The model excluding "Customer Service Calls" (0.8333) has a higher precision compared to the model including "Customer Service Calls" (0.5385).
+This means that when the first model predicts a customer will churn, it is correct more often than the second model.
+
+2\.
+**AUC**: The model including "Customer Service Calls" (0.8479) has a higher AUC-ROC compared to the model excluding "Customer Service Calls" (0.7491).
+This indicates that the model including "Customer Service Calls" is better at distinguishing between the classes (churn vs no churn) across different threshold levels.
+
+3\.
+**F1 Score**: The model including "Customer Service Calls" (0.1284) also has a higher F1 Score than the model excluding "Customer Service Calls" (0.0980).
+The F1 score is a measure of a test's accuracy that considers both the precision and the recall.
+
+4\.
+**Recall**: The model including "Customer Service Calls" (0.0729) has a higher recall compared to the model excluding "Customer Service Calls" (0.0521).
+This means that the model including "Customer Service Calls" is better at identifying positive instances (churned customers).
+
+The model excluding "Customer Service Calls" has higher precision, but the model including "Customer Service Calls" outperforms it in terms of AUC, F1 Score, and Recall.
+If you want to be more certain when predicting a positive (a churned customer), then higher precision (and the model excluding "Customer Service Calls") is better.
+If you want to be more comprehensive in finding positive cases, higher recall (and the model including "Customer Service Calls") is better.
+Moreover, if you want a balance between precision and recall, you should consider the F1 score.
+Lastly, if you want the model with better overall class separation ability, you might prefer the one with higher AUC.
+
+Since we are looking to predict customers that will churn, higher precision might be better, thus the model excluding the Number of Customer Service Calls would fit our needs.
+
+## Non Linear Models (Random Forest)
+
+The results of the lasso logistic regression are somewhat good.
+But by using such method we are not taking into consideration possible non linear relations between the variables, so we now create a random forest model.
+
+Random Forest: we will also in this case analyse the model in two, the first will contain the feature Number Customer Service Calls, while the second will not, this to remain coherent with what we have done previously.
+
+```{r, echo = FALSE, fig.width = 5, fig.height = 2.5, fig.align = 'center'}
+
+#Using random forest for classification
+# Train the Random Forest model
+set.seed(123)
+rf_model <- randomForest(Churn ~ ., data = train_set, importance = TRUE, ntree = 700)
+
+
+# Predict on the test set
+rf_predictions <- predict(rf_model, newdata = test_set)
+
+# Convert to factors
+rf_predicted_labels <- as.factor(rf_predictions)
+levels(rf_predicted_labels) <- levels(test_set$Churn)
+
+# Compute confusion matrix and print it
+rf_confusionMatrix <- confusionMatrix(rf_predicted_labels, test_set$Churn)
+
+
+# Compute Accuracy
+rf_accuracy <- sum(rf_predicted_labels == test_set$Churn) / nrow(test_set)
+
+
+# Precision, Recall, and F1 Score
+rf_conf_mat <- rf_confusionMatrix$table
+rf_precision <- rf_conf_mat[2,2] / sum(rf_conf_mat[2,])
+rf_recall <- rf_conf_mat[2,2] / sum(rf_conf_mat[,2])
+rf_f1_score <- 2 * ((rf_precision*rf_recall) / (rf_precision + rf_recall))
+
+
+# Predict probabilities on the test 
+rf_probabilities <- predict(rf_model, newdata = test_set, type = "prob")
+
+# Compute AUC-ROC
+roc_obj_rf <- roc(test_set$Churn, rf_probabilities[, "True"])
+auc_rf <- auc(roc_obj_rf)
+
+
+```
+
+Now we will test the Random Forest model without the Number of Customer Service Calls
+
+```{r, echo = FALSE, fig.width = 10, fig.height = 5, fig.align = 'center'}
+exclude_feature <- "Number.Customer.Service.Calls"
+train_set2_filtered <- train_set[, !colnames(train_set) %in% exclude_feature]
+test_set2_filtered <- test_set[, !colnames(test_set) %in% exclude_feature]
+
+# Build the random forest model
+rf_model2 <- randomForest(Churn ~ ., data = train_set2_filtered, importance = TRUE, ntree = 700)
+
+# Predict on the test set
+rf_predictions2 <- predict(rf_model2, newdata = test_set2_filtered)
+
+# Convert to factors
+rf_predicted_labels2 <- as.factor(rf_predictions2)
+levels(rf_predicted_labels2) <- levels(test_set$Churn)
+
+# Compute confusion matrix and print it
+rf_confusionMatrix2 <- confusionMatrix(rf_predicted_labels2, test_set2_filtered$Churn)
+
+
+# Compute Accuracy
+rf_accuracy2 <- sum(rf_predicted_labels2 == test_set2_filtered$Churn) / nrow(test_set2_filtered)
+
+# Precision, Recall, and F1 Score
+rf_conf_mat2 <- rf_confusionMatrix2$table
+rf_precision2 <- rf_conf_mat2[2,2] / sum(rf_conf_mat2[2,])
+rf_recall2 <- rf_conf_mat2[2,2] / sum(rf_conf_mat2[,2])
+rf_f1_score2 <- 2 * ((rf_precision2*rf_recall2) / (rf_precision2 + rf_recall2))
+
+
+# Predict probabilities on the test 
+rf_probabilities2 <- predict(rf_model2, newdata = test_set2_filtered, type = "prob")
+
+# Compute AUC-ROC
+roc_obj_rf2 <- roc(test_set2_filtered$Churn, rf_probabilities2[, "True"])
+auc_rf2 <- auc(roc_obj_rf2)
+
+
+#Model with the Number of Customer Service Calls
+varImpPlot(rf_model)
+
+#Model without the Number of Customer Service Calls
+varImpPlot(rf_model2)
+
+
+
+
+```
+
+Looking at rf_model (with number of customer service call) and rf_model2 (without number of customer service call), we can see that the features that have the top 3 MeanDecreaseAccuracy are Number.Customer.Service.Calls (for rf_model), International.Plan, Total.Day.Minutes and Total.Day.Charge.
+While if we look at the MeanDecreaseGini, the top 3 stay the same, with State, Total.Day.Minutes and Total.Day.Charge.
+
+```{r, echo=FALSE,fig.width = 5, fig.height = 2.5, fig.align = 'center'}
+#Let us append the new model to the performance_df
+performance_df <- rbind(performance_df, c("Random Forest with customer service calls", rf_precision,auc(roc_obj_rf),rf_f1_score,rf_recall,rf_precision ))
+performance_df <- rbind(performance_df, c("Random Forest without customer service calls", rf_precision2,auc(roc_obj_rf2),rf_f1_score2,rf_recall2,rf_precision2 ))
+performance_df
+```
+
+**3. Random Forest with customer service calls:** The Random Forest model with customer service calls is performing better across all metrics.
+*Precision* is 0.923, *Recall* is 0.75, *AUC* is 0.926, and *Accuracy* is 0.923.
+The high *F1* score (0.827) suggests a good balance between precision and recall.
+This model appears to perform well overall and considerably better than either Lasso Logistic Regression model with and without Number Customer Service Calls.
+
+**4.Random Forest without customer service calls:** Removing customer service calls from the Random Forest model increases *Precision* (0.928) and *Accuracy* (0.928), but decreases *Recall* (0.541), *AUC* (0.800), and *F1* (0.684).
+This suggests that, while the model makes fewer false positive predictions without the customer service calls feature, it also misses a larger number of actual positive instances.
+
+Overall, the Random Forest model with customer service calls seems to provide the best performance, considering all the metrics.
+Even if we consider the Random Forest without the Customer Service Calls, the precision and accuracy is just slightly better than the other model implemented, while the AUC, F1 score and recall are significantly worse.
+This goes to show that Number Customer Service Calls is an important feature.
+
+Now we get into clustering the telecom's customers.
+First let's see the how Kmeans clusters with outliers.
+
+# Clustering
+
+We now want to cluster the customers according to their behavior and then we will check if the clusters have been grouped together well based on the Churn rate.
+
+## Kmeans
+
+We will now first calculate the WSS (elbow method) and the silhouette score to better decide the number of clusters to implement.
+Afterwards we will see how well the method clustered the different customers and analyze the potential criterion for this partition.
+
+```{r, echo=FALSE,fig.width = 5, fig.height = 2.5, fig.align = 'center'}
+# Select relevant columns
+library(dplyr)
+data_2 <- data %>% select(Account.Length, Number.Vmail.Messages, Total.Day.Minutes, Total.Day.Calls, Total.Day.Charge, Total.Eve.Minutes, Total.Eve.Calls, Total.Eve.Charge, Total.Night.Minutes, Total.Night.Calls, Total.Night.Charge, Total.Intl.Minutes, Total.Intl.Calls, Total.Intl.Charge, Number.Customer.Service.Calls)
+
+#we now scale the numeric data
+data_2 <- data_2 %>%
+  mutate(across(where(is.numeric), scale))
+
+#elbow method
+k_values <- 1:10
+withinss <- numeric(length(k_values))
+
+for (i in seq_along(k_values)) {
+  k <- k_values[i]
+  kmeans_result <- kmeans(data_2, centers = k)
+  withinss[i] <- kmeans_result$tot.withinss
+}
+
+elb <- plot(k_values, withinss, type = "b", pch = 19, frame = FALSE,
+        xlab = "Number of Clusters (k)", ylab = "Within-cluster Sum of Squares")
+
+
+#silhouette score by k
+silk <- fviz_nbclust(data_2, kmeans, method='silhouette')
+grid.arrange(elb, silk, ncol = 1)
+
+```
+
+From the WSS method, we can see that the potential number of clusters ranges from 5 to maybe 6, but if we only look at the silhouette score, we see that the optimal number of clusters is 2.
+We thus decided to see the potential clusters ranging from 2 to 6.
+
+Indeed the silhouette score by k, measures the quality of clustering, the higher it is, the better, as it indicates that they are more distinguishable and separate.
+On the other hand the within sum of squares indicated in the elbow plot indicates roughly "how close" data points are in the cluster, that is, how segregated they are (the higher, the better, stronger community).
+
+```{r,echo = FALSE, fig.width = 10, fig.height = 5, fig.align = 'center'}
+# Run k-means clustering for k=2 to k=6
+# K-means clustering with different values of k (data without the 5 outliers)
+kmeans_plots <- lapply(2:6, function(k) {
+  set.seed(123)
+  kmeans_model <- kmeans(data_2, centers = k, nstart = 25)
+  fviz_cluster(kmeans_model, data = scale(data_2), geom = "point", 
+               main = paste("K-Means Clustering(k =", k, ")"))
+})
+
+# Arrange plots in a grid
+plot_grid(plotlist = kmeans_plots, align = "h", axis = "tb")
+```
+
+We can clearly see that in fact, the silhouette score was correct, the optimal amount of clusters is in fact 2.
+We will now see if kmeans has done a good job in clustering the customers also based on the churn rate.
+
+## Hierarchical Clustering
+
+We will use Euclidean distance and 1-row correlation to see which is better at clustering the data.
+
+The process is similar to what we did for k-mean, we calculate the silhouette and then based on the resulting k choose the number of clusters.
+
+```{r, echo=FALSE,fig.width = 4, fig.height = 1.5, fig.align = 'center'}
+# Compute hierarchical clustering with different dissimilarity measures
+data_2_scaled  <- data_2
+
+#euclidean
+dist_euc <- dist(data_2_scaled, method = "euclidean")
+hc_euclidean <- hclust(dist_euc, method = "ward.D2")
+
+#1- row correlation
+dist_cor <- as.dist(1 - cor(t(data_2_scaled)))
+hc_correlation <- hclust(dist_cor, method = "ward.D2")
+
+# Plot dendograms
+#plot(hc_euclidean, cex = 0.6, main = "Dendrogram (Euclidean distance)")
+#plot(hc_correlation, cex = 0.6, main = "Dendrogram (1 - row correlation)")
+
+# Initialize vectors for storing silhouette scores
+silhouette_euclidean <- numeric(5)
+silhouette_correlation <- numeric(5)
+
+# Iterate over different values of k
+for (k in 2:6) {
+  
+  # Compute cluster assignments for euclidean distance
+  hc_euclidean_k <- cutree(hc_euclidean, k = k)
+  
+  # Compute silhouette score for euclidean distance
+  silhouette_euclidean[k - 1] <- mean(silhouette(hc_euclidean_k, dist_euc)[, "sil_width"])
+  
+  # Compute cluster assignments for 1 - row correlation
+  hc_correlation_k <- cutree(hc_correlation, k = k)
+  
+  # Compute silhouette score for 1 - row correlation
+  silhouette_correlation[k - 1] <- mean(silhouette(hc_correlation_k, dist_cor)[, "sil_width"])
+  
+}
+
+
+cat("Silhouette scores for euclidean distance:", silhouette_euclidean, "\n")
+cat("Silhouette scores for 1 - row correlation:", silhouette_correlation, "\n")
+```
+
+We see that the best score is with k=2 or k=3 for both types of distance measures.
+Now let us see how the clusters look to better understand the groups.
+
+```{r, echo=FALSE,fig.width = 7, fig.height = 3.5, fig.align = 'center'}
+plot_list3 <- list()  # initialize list for euclidean distance plots
+plot_list4 <- list()  # initialize list for 1 - row correlation plots
+
+# Iterate over different values of k
+for (k in 2:3) {
+  
+  # Compute cluster assignments for euclidean distance
+  hc_euclidean_k <- cutree(hc_euclidean, k = k)
+  
+  # Plot clusters for euclidean distance
+  plot_title <- paste0("Clusters (Euclidean distance) for k =", k)
+  plot_title <- gsub(" ", "_", plot_title)
+  plot_list3[[k-1]] <- fviz_cluster(list(data = data_2_scaled, cluster = hc_euclidean_k), 
+                                    geom = "point", 
+                                    palette = "jco", 
+                                    main = plot_title) + theme_bw()
+  
+  # Compute cluster assignments for 1 - row correlation
+  hc_correlation_k <- cutree(hc_correlation, k = k)
+  
+  # Plot clusters for 1 - row correlation
+  plot_title <- paste0("Clusters (1 - row correlation) for k =", k)
+  plot_title <- gsub(" ", "_", plot_title)
+  plot_list4[[k-1]] <- fviz_cluster(list(data = data_2_scaled, cluster = hc_correlation_k), 
+                                    geom = "point", 
+                                    palette = "jco", 
+                                    main = plot_title) + theme_bw()
+}
+
+# Combine plots into grid of subplots
+#grid.arrange(grobs = plot_list3, nrow = 3, ncol = 2, top = "Clusters (Euclidean distance)") 
+#grid.arrange(grobs = plot_list4, nrow = 3, ncol = 2, top = "Clusters (1 - row correlation)")
+
+
+```
+
+The results obtained with Hierarchical clustering, using both measures is rather disappointing, the clusters overlap.
+We can clearly say that K-means did a better job at identifying the clusters both graphically and with a better silhouette score.
+
+## Deeper dive into the clusters
+
+Now we shall have a deeper look at the two clusters obtained using the K-means and what they actually represent.
+We will focus on International.Plan, Account.Length, Total.Day.Minutes, Total.Eve.Minutes, Total.Night.Minutes which were important for the loadings of the second component of the PCA.
+
+```{r,echo=FALSE, fig.width = 7, fig.height = 3.5, fig.align = 'center'}
+data_new <- cleaned_numeric_data
+kmeans_results <- kmeans(data_2,centers=2, nstart=25)
+data$clusters2 <- kmeans_results$cluster
+
+
+# Run k-means clustering with k=2
+kmeans_model <- kmeans(data_2, centers = 2, nstart = 25)
+
+# Retrieve cluster assignments
+cluster_assignments <- kmeans_model$cluster
+
+# Create a new data frame with cluster assignments and Churn variable
+cluster_churn <- data.frame(cluster = cluster_assignments, Churn = data$Churn)
+
+# Calculate churn rate for each cluster
+churn_rates <- cluster_churn %>%
+  group_by(cluster) %>%
+  summarize(churn_rate = mean(Churn == "True"))
+
+# Print the churn rate
+print(churn_rates)
+
+
+#Do clusters regroup well? 
+
+# Create the boxplot for  with regrouped clusters2
+bar1 <- ggplot(data, aes(x = interaction(clusters2, data$International.Plan))) +
+  geom_bar(fill = "lightgray", color = "black") +
+  labs(x = "clusters2", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("International Plan")
+
+# By account length
+bar2 <- ggplot(data, aes(x = interaction(clusters2, data$clusters2), y = data$Account.Length)) +
+  stat_summary(fun = "mean", geom = "bar", position = "dodge") +
+  labs(x = "clusters2", y = "Average Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("AVG Account Length")
+
+# Average value by clusters2 - Total Day Minutes
+bar3 <- ggplot(data, aes(x = interaction(clusters2, data$clusters2), y = data$Total.Day.Minutes)) +
+  stat_summary(fun = "mean", geom = "bar", position = "dodge") +
+  labs(x = "clusters2", y = "Average Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("AVG. Total Day Minutes")
+
+# Average value by clusters2 - Total Day Charge
+bar4 <- ggplot(data, aes(x = interaction(clusters2, data$clusters2), y = data$Total.Night.Minutes)) + 
+  stat_summary(fun = "mean", geom = "bar", position = "dodge") +
+  labs(x = "clusters2", y = "Average Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("AVG Total Night Minutes")
+
+bar5 <- ggplot(data, aes(x = interaction(clusters2, data$clusters2), y = data$Total.Eve.Minutes)) + 
+  stat_summary(fun = "mean", geom = "bar", position = "dodge") +
+  labs(x = "clusters2", y = "Average Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Avg. Total Eve Minutes")
+
+
+grid.arrange(bar1, bar2, bar3, bar4, bar5, ncol = 3)
+
+```
+
+# Final Considerations
+
+Looking at the 2 clusters and the bar-plots above, we can deduce the following information.
+Using the information below from the PCA loadings, we found out that Kmeans presumably clustered based on the total call minutes during the different periods of the day - The features loadings have significant positive/negative correlation with the second component, and as we can see the clusters are divided based almost solely on it (we are just taking 27% if variability but still quite relevant).
+
+There were not other substantial differences in customers belonging to the 2 different clusters; It is noticeable that the second cluster has an higher churn rate than the first with a 17% vs 11% of the first.
+
+The general churn rate for all customers is of 16.95%, suggesting that the primary cause of churning might be that the price charge during the day and the evening is not adequate to retain customers in the long run, whilst those who call most during the night are more satisfied with the call price they are charged.
+
+These assumptions are based on the results of the clustering and on the bar-plots above - On average clients in the second cluster call more during the day and the evening, whilst in cluster 1, people tent to call much more during the night.
+\tiny
+```{r, echo=FALSE,fig.width = 4, fig.height = 2, fig.align = 'center'}
+pca2 <- prcomp(data_2)
+
+#loadings(weights)
+loadings <- data.frame(variable = colnames(data_2),  PC2 = pca2$rotation[, 2])
+print(loadings)
+
+```
+\tiny
+```{r, echo=FALSE,fig.width = 4, fig.height = 2, fig.align = 'center'}
+night_cost <- ifelse(data$Total.Night.Minutes !=0, data$Total.Night.Minutes/data$Total.Night.Charge,0) #cost of 22 on average
+eve_cost <- ifelse(data$Total.Eve.Charge != 0, data$Total.Eve.Minutes / data$Total.Eve.Charge, 0)#cost of 11 on average
+day_cost <- ifelse(data$Total.Day.Charge != 0, data$Total.Day.Minutes / data$Total.Day.Charge, 0) #cost of 5 on average
+
+cat(mean(night_cost), "for Night calls", "\n")
+cat(mean(eve_cost), "for Evening calls", "\n")
+cat(mean(day_cost), "for Day calls", "\n")
+
+```
+\normalsize
+Now let us see if the churn rate of the various features corresponds to our hypothesis.
+\tiny
+```{r, echo=FALSE,fig.width = 3, fig.height = 1, fig.align = 'center'}
+#Churn rate for different features
+churn_rate_account_lenght <- mean(data$Churn[data$Account.Length] == "True")
+churn_rate_totaldayminutes <- mean(data$Churn[data$Total.Day.Minutes] == "True")
+churn_rate_totaleveminutes <- mean(data$Churn[data$Total.Eve.Minutes] == "True")
+churn_rate_totalnightminutes <- mean(data$Churn[data$Total.Night.Minutes] == "True")
+churn_rate_internationalplan <- mean(data$Churn[data$International.Plan] == "True")
+
+#Print churn rates
+cat(churn_rate_totaldayminutes, "Churn rate for Day calls", "\n")
+cat(churn_rate_totaleveminutes, "Churn rate for Evening calls", "\n")
+cat(churn_rate_totalnightminutes, "Churn rate for Night calls", "\n")
+```
+\normalsize
+Here we can clearly see that Kmeans and as a consequence the loading of the second PCA, have in fact correctly divided the clusters. The second cluster had in fact more customers that called during the day and evening and also had a higher churn rate at 17%.
+We can see now in fact that the churn rate for the Day (11%) and Evening customers (10%) is slightly higher than the Night customers (9%), suggesting that maybe the price for the Day (5.8) and Evening customers (11.8), even if it's lower than the Night price (22.2), doesn't keep the customers in the long run.
+It might be due to potential technical issue (i.e server overcrowding) or maybe there are more competitive Day and Evening prices among the competition.
